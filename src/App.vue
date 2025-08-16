@@ -8,11 +8,18 @@
             <button @click="setMode('point')" :class="{ active: mode === 'point' }">点</button>
             <button @click="deleteSelected" :disabled="!selectedId">删除</button>
             <button @click="undoLastPoint" :disabled="!canUndoPoint">撤销点</button>
+            <!-- 隐藏/显示按钮 -->
+            <button @click="toggleSelectedVisibility" :disabled="!selectedId">
+                {{ selectedAnnotation?.visible !== false ? '隐藏选中' : '显示选中' }}
+            </button>
+            <button @click="toggleAllVisibility">
+                {{ allVisible ? '隐藏所有' : '显示所有' }}
+            </button>
             <button @click="exportAnnotations">导出</button>
             <!-- <button @click="loadImage">加载图片</button> -->
             <button @click="resetView">重置视图</button>
+            <div class="shortcut-hint">快捷键: N - 开始标注 | 中键 - 移动图片</div>
         </div>
-
         <div class="main-content">
             <div class="left-panel">
                 <!-- 图片列表 -->
@@ -40,7 +47,6 @@
                             class="remove-image-btn">删除当前图片</button>
                     </div>
                 </div>
-
                 <!-- 标签列表 -->
                 <div class="label-list">
                     <h3>标签列表</h3>
@@ -57,18 +63,15 @@
                     </div>
                 </div>
             </div>
-
             <div class="canvas-container" ref="containerRef">
                 <canvas ref="canvasRef" @mousedown="handleMouseDown" @mousemove="handleMouseMove"
                     @mouseup="handleMouseUp" @dblclick="handleDoubleClick" @wheel="handleWheel"
                     @contextmenu="handleRightClick"></canvas>
-
                 <!-- 标签编辑输入框 -->
                 <div v-if="selectedId && editingLabel" class="label-editor" :style="labelEditorStyle">
                     <input ref="labelInputRef" v-model="labelText" @blur="saveLabel" @keydown.enter="saveLabel"
                         placeholder="输入标签" />
                 </div>
-
                 <!-- 标签属性编辑器 -->
                 <div v-if="selectedId && editingProperties" class="properties-editor" :style="propertiesEditorStyle">
                     <div class="properties-header">
@@ -90,14 +93,12 @@
                         <button @click="closePropertiesEditor" class="cancel-btn">取消</button>
                     </div>
                 </div>
-
                 <!-- 点操作提示 -->
                 <div v-if="pointOperationHint" class="hint">
                     {{ pointOperationHint }}
                 </div>
             </div>
         </div>
-
         <!-- 标注属性面板 -->
         <div v-if="selectedAnnotation" class="annotation-properties-panel">
             <h3>标注属性</h3>
@@ -105,6 +106,10 @@
                 <div class="info-item">
                     <span class="label">类型:</span>
                     <span class="value">{{ getAnnotationTypeName(selectedAnnotation.type) }}</span>
+                </div>
+                <div class="info-item">
+                    <span class="label">显示:</span>
+                    <input type="checkbox" v-model="selectedAnnotation.visible" @change="handleVisibilityChange" />
                 </div>
                 <div class="info-item">
                     <span class="label">标签:</span>
@@ -129,7 +134,6 @@
                 </div>
             </div>
         </div>
-
         <div class="status">
             <span>当前模式: {{ modeText }}</span>
             <span v-if="selectedId">已选中: {{ selectedId }}</span>
@@ -137,29 +141,26 @@
                 currentPoints.length }}</span>
             <span>缩放: {{ Math.round(scale * 100) }}%</span>
             <span v-if="currentImageIndex >= 0">当前图片: {{ currentImageIndex + 1 }}/{{ imageList.length }}</span>
+            <span>可见标注: {{ visibleAnnotationsCount }}/{{ annotations.length }}</span>
         </div>
     </div>
 </template>
-
 <script setup lang="ts">
 import { ref, onMounted, computed, nextTick, watch } from 'vue'
-
 // 标注类型定义
 type AnnotationType = 'rect' | 'polygon' | 'polyline' | 'point'
-
 interface Point {
     x: number
     y: number
 }
-
 interface BaseAnnotation {
     id: string
     type: AnnotationType
     color: string
     label?: string
     properties?: Record<string, string>
+    visible?: boolean // 是否可见
 }
-
 interface RectAnnotation extends BaseAnnotation {
     type: 'rect'
     x: number
@@ -167,25 +168,20 @@ interface RectAnnotation extends BaseAnnotation {
     width: number
     height: number
 }
-
 interface PolygonAnnotation extends BaseAnnotation {
     type: 'polygon'
     points: Point[]
 }
-
 interface PolylineAnnotation extends BaseAnnotation {
     type: 'polyline'
     points: Point[]
 }
-
 interface PointAnnotation extends BaseAnnotation {
     type: 'point'
     x: number
     y: number
 }
-
 type Annotation = RectAnnotation | PolygonAnnotation | PolylineAnnotation | PointAnnotation
-
 interface ImageData {
     url: string
     filename: string
@@ -208,42 +204,39 @@ const isDragging = ref(false)
 const dragType = ref<'move' | 'resize' | 'vertex' | 'image' | 'addPoint' | null>(null)
 const dragIndex = ref<number>(-1)
 const dragOffset = ref<Point>({ x: 0, y: 0 })
-
 // 图片视图状态
 const scale = ref(1)
 const offset = ref<Point>({ x: 0, y: 0 })
 const isDraggingImage = ref(false)
 const lastMousePos = ref<Point>({ x: 0, y: 0 })
-
 // 标签编辑状态
 const editingLabel = ref(false)
 const labelText = ref('')
 const labelEditorStyle = ref({ top: '0px', left: '0px' })
-
 // 标签属性编辑状态
 const editingProperties = ref(false)
 const currentProperties = ref<Record<string, string>>({})
 const propertyKeys: any = ref<Record<string, string>>({})
 const propertiesEditorStyle = ref({ top: '0px', left: '0px' })
-
 // 多边形/折线拖拽状态
 const polygonDragStartPoints = ref<Point[]>([])
-
 // 点操作状态
 const pointOperationHint = ref<string>('')
-
 // 图片列表状态
 const imageList = ref<ImageData[]>([])
 const currentImageIndex = ref(-1)
+// 新增：快捷绘制状态
+const quickDrawMode = ref<AnnotationType | null>(null)
+const isQuickDrawing = ref(false)
 
 // 计算属性
 const modeText = computed(() => {
     const modeMap = {
         select: '选择模式',
-        rect: '绘制矩形',
-        polygon: '绘制多边形',
-        polyline: '绘制折线',
-        point: '绘制点'
+        rect: '矩形模式',
+        polygon: '多边形模式',
+        polyline: '折线模式',
+        point: '点模式'
     }
     return modeMap[mode.value]
 })
@@ -272,10 +265,20 @@ const selectedAnnotation = computed(() => {
     return annotations.value.find(a => a.id === selectedId.value) || null
 })
 
+// 判断是否所有标注都可见
+const allVisible = computed(() => {
+    if (annotations.value.length === 0) return true
+    return annotations.value.every(anno => anno.visible !== false)
+})
+
+// 获取可见标注数量
+const visibleAnnotationsCount = computed(() => {
+    return annotations.value.filter(anno => anno.visible !== false).length
+})
+
 // 获取图片边界
 const getImageBounds = () => {
     if (!backgroundImage.value) return null
-
     return {
         left: offset.value.x,
         top: offset.value.y,
@@ -290,7 +293,6 @@ const getImageBounds = () => {
 const clampPointToImage = (point: Point): Point => {
     const bounds = getImageBounds()
     if (!bounds) return point
-
     return {
         x: Math.max(bounds.left, Math.min(point.x, bounds.right)),
         y: Math.max(bounds.top, Math.min(point.y, bounds.bottom))
@@ -301,7 +303,6 @@ const clampPointToImage = (point: Point): Point => {
 const clampRectToImageStrict = (rect: RectAnnotation): RectAnnotation => {
     const bounds = getImageBounds()
     if (!bounds) return rect
-
     // 转换为画布坐标
     const canvasRect = {
         x: rect.x * scale.value + offset.value.x,
@@ -309,7 +310,6 @@ const clampRectToImageStrict = (rect: RectAnnotation): RectAnnotation => {
         width: rect.width * scale.value,
         height: rect.height * scale.value
     }
-
     // 严格限制在图片边界内
     let clampedX = canvasRect.x
     let clampedY = canvasRect.y
@@ -364,6 +364,29 @@ onMounted(() => {
 
     // 监听键盘事件
     window.addEventListener('keydown', (e) => {
+        // 快捷键N：开始标注
+        if (e.key === 'n' || e.key === 'N') {
+            if (mode.value !== 'select') {
+                // 如果当前已经是绘制模式，则激活快捷绘制
+                isQuickDrawing.value = true
+                pointOperationHint.value = '开始绘制标注'
+                setTimeout(() => {
+                    pointOperationHint.value = ''
+                }, 2000)
+            } else {
+                // 如果当前是选择模式，则激活上一次的绘制模式
+                if (quickDrawMode.value) {
+                    mode.value = quickDrawMode.value
+                    isQuickDrawing.value = true
+                    pointOperationHint.value = `开始绘制${getAnnotationTypeName(quickDrawMode.value)}`
+                    setTimeout(() => {
+                        pointOperationHint.value = ''
+                    }, 2000)
+                }
+            }
+        }
+
+        // 左右箭头切换图片
         if (e.key === 'ArrowLeft') {
             if (currentImageIndex.value > 0) {
                 selectImage(currentImageIndex.value - 1)
@@ -406,7 +429,6 @@ const loadImage = () => {
     const img = new Image()
     img.crossOrigin = 'Anonymous' // 处理跨域问题
     img.src = 'http://localhost:9000/img/1.jpg'
-
     img.onload = () => {
         // 添加新图片到列表
         imageList.value.push({
@@ -414,16 +436,13 @@ const loadImage = () => {
             filename: 'demo.jpg',
             annotations: []
         })
-
         // 选中新添加的图片
         selectImage(imageList.value.length - 1)
     }
-
     img.onerror = () => {
         console.error('图片加载失败')
         const canvas = canvasRef.value
         if (!canvas) return
-
         const ctx = canvas.getContext('2d')
         if (ctx) {
             ctx.fillStyle = '#f0f0f0'
@@ -442,7 +461,6 @@ const addImage = () => {
     input.type = 'file'
     input.accept = 'image/*'
     input.multiple = true
-
     input.onchange = (e: any) => {
         const files = e.target.files
         if (!files || files.length === 0) return
@@ -467,17 +485,14 @@ const addImage = () => {
             }
         }, 100)
     }
-
     input.click()
 }
 
 // 删除当前图片
 const removeCurrentImage = () => {
     if (currentImageIndex.value === -1) return
-
     if (confirm('确定要删除当前图片吗？删除后所有标注将丢失。')) {
         imageList.value.splice(currentImageIndex.value, 1)
-
         if (imageList.value.length === 0) {
             currentImageIndex.value = -1
             backgroundImage.value = null
@@ -507,26 +522,20 @@ const selectImage = (index: number) => {
     const img = new Image()
     img.crossOrigin = 'Anonymous'
     img.src = imageData.url
-
     img.onload = () => {
         backgroundImage.value = img
-
         // 加载新图片的标注
         annotations.value = [...imageData.annotations]
         selectedId.value = null
-
         // 居中显示图片
         centerImage()
-
         // 绘制图片
         redrawCanvas()
     }
-
     img.onerror = () => {
         console.error('图片加载失败')
         const canvas = canvasRef.value
         if (!canvas) return
-
         const ctx = canvas.getContext('2d')
         if (ctx) {
             ctx.fillStyle = '#f0f0f0'
@@ -576,6 +585,10 @@ const resetView = () => {
 // 设置模式
 const setMode = (newMode: typeof mode.value) => {
     mode.value = newMode
+    // 如果是绘制模式，记录到快捷绘制模式
+    if (newMode !== 'select') {
+        quickDrawMode.value = newMode
+    }
     selectedId.value = null
     currentPoints.value = []
     tempAnnotation.value = null
@@ -584,6 +597,7 @@ const setMode = (newMode: typeof mode.value) => {
     editingLabel.value = false
     editingProperties.value = false
     pointOperationHint.value = ''
+    isQuickDrawing.value = false
     redrawCanvas()
 }
 
@@ -595,6 +609,35 @@ const undoLastPoint = () => {
         setTimeout(() => {
             pointOperationHint.value = ''
         }, 2000)
+        redrawCanvas()
+    }
+}
+
+// 切换选中标注的可见性
+const toggleSelectedVisibility = () => {
+    if (!selectedId.value) return
+    const annotation = annotations.value.find(a => a.id === selectedId.value)
+    if (annotation) {
+        annotation.visible = annotation.visible === false ? true : false
+        saveCurrentImageAnnotations()
+        redrawCanvas()
+    }
+}
+
+// 切换所有标注的可见性
+const toggleAllVisibility = () => {
+    const newVisibleState = !allVisible.value
+    annotations.value.forEach(anno => {
+        anno.visible = newVisibleState
+    })
+    saveCurrentImageAnnotations()
+    redrawCanvas()
+}
+
+// 处理可见性变化
+const handleVisibilityChange = () => {
+    if (selectedAnnotation.value) {
+        saveCurrentImageAnnotations()
         redrawCanvas()
     }
 }
@@ -639,7 +682,6 @@ const saveLabel = () => {
 // 开始编辑标签
 const startEditingLabel = (e: MouseEvent, annotation: Annotation) => {
     e.stopPropagation()
-
     if (annotation.type === 'rect') {
         const rect = annotation as RectAnnotation
         const canvasRect = imageToCanvas(rect.x, rect.y)
@@ -664,10 +706,8 @@ const startEditingLabel = (e: MouseEvent, annotation: Annotation) => {
             left: `${canvasPoint.x}px`
         }
     }
-
     labelText.value = annotation.label || ''
     editingLabel.value = true
-
     nextTick(() => {
         if (labelInputRef.value) {
             labelInputRef.value.focus()
@@ -679,7 +719,6 @@ const startEditingLabel = (e: MouseEvent, annotation: Annotation) => {
 // 编辑选中标注的标签
 const editSelectedAnnotationLabel = () => {
     if (!selectedAnnotation.value) return
-
     // 模拟点击事件来启动标签编辑
     const mockEvent = new MouseEvent('mousedown', {
         clientX: 100,
@@ -691,7 +730,6 @@ const editSelectedAnnotationLabel = () => {
 // 编辑选中标注的属性
 const editSelectedAnnotationProperties = () => {
     if (!selectedAnnotation.value) return
-
     // 初始化属性编辑器
     currentProperties.value = { ...selectedAnnotation.value.properties || {} }
     const properties = selectedAnnotation.value.properties || {}
@@ -699,7 +737,6 @@ const editSelectedAnnotationProperties = () => {
     for (const key in properties) {
         propertyKeys.value[key] = key
     }
-
     // 设置属性编辑器位置
     const canvas = canvasRef.value
     if (canvas) {
@@ -708,7 +745,6 @@ const editSelectedAnnotationProperties = () => {
             left: `${canvas.width / 2 - 150}px`
         }
     }
-
     editingProperties.value = true
 }
 
@@ -732,7 +768,6 @@ const saveProperties = () => {
                     filteredProperties[key.trim()] = value.trim()
                 }
             })
-
             annotation.properties = Object.keys(filteredProperties).length > 0 ? filteredProperties : undefined
             // 保存当前图片的标注
             saveCurrentImageAnnotations()
@@ -758,11 +793,9 @@ const removeProperty = (key: string) => {
 // 更新属性键
 const updatePropertyKey = (oldKey: string, newKey: string) => {
     if (oldKey === newKey) return
-
     const value = currentProperties.value[oldKey]
     delete currentProperties.value[oldKey]
     delete propertyKeys.value[oldKey]
-
     if (newKey.trim()) {
         currentProperties.value[newKey] = value
         propertyKeys.value[newKey] = newKey
@@ -780,7 +813,6 @@ const getPolygonCenter = (points: Point[]): Point => {
         x: acc.x + point.x,
         y: acc.y + point.y
     }), { x: 0, y: 0 })
-
     return {
         x: sum.x / points.length,
         y: sum.y / points.length
@@ -790,7 +822,6 @@ const getPolygonCenter = (points: Point[]): Point => {
 // 添加点到多边形/折线
 const addPointToPolygon = (e: MouseEvent, annotation: PolygonAnnotation | PolylineAnnotation) => {
     e.stopPropagation()
-
     const canvas = canvasRef.value
     if (!canvas) return
 
@@ -805,17 +836,14 @@ const addPointToPolygon = (e: MouseEvent, annotation: PolygonAnnotation | Polyli
     // 找到最近的边
     let minDistance = Infinity
     let insertIndex = 0
-
     for (let i = 0; i < annotation.points.length - (annotation.type === 'polyline' ? 1 : 0); i++) {
         const p1 = annotation.points[i]
         const p2 = annotation.points[(i + 1) % annotation.points.length]
-
         const distance = distanceToLineSegment(
             imagePoint.x, imagePoint.y,
             p1.x, p1.y,
             p2.x, p2.y
         )
-
         if (distance < minDistance) {
             minDistance = distance
             insertIndex = i + 1
@@ -824,25 +852,20 @@ const addPointToPolygon = (e: MouseEvent, annotation: PolygonAnnotation | Polyli
 
     // 插入新点
     annotation.points.splice(insertIndex, 0, imagePoint)
-
     // 保存当前图片的标注
     saveCurrentImageAnnotations()
-
     pointOperationHint.value = '已添加新点'
     setTimeout(() => {
         pointOperationHint.value = ''
     }, 2000)
-
     redrawCanvas()
 }
 
 // 删除多边形/折线的点
 const deletePointFromPolygon = (e: MouseEvent, annotation: PolygonAnnotation | PolylineAnnotation, index: number) => {
     e.stopPropagation()
-
     // 至少保留3个点（多边形）或2个点（折线）
     const minPoints = annotation.type === 'polygon' ? 3 : 2
-
     if (annotation.points.length <= minPoints) {
         pointOperationHint.value = `至少需要保留${minPoints}个点`
         setTimeout(() => {
@@ -852,15 +875,12 @@ const deletePointFromPolygon = (e: MouseEvent, annotation: PolygonAnnotation | P
     }
 
     annotation.points.splice(index, 1)
-
     // 保存当前图片的标注
     saveCurrentImageAnnotations()
-
     pointOperationHint.value = '已删除点'
     setTimeout(() => {
         pointOperationHint.value = ''
     }, 2000)
-
     redrawCanvas()
 }
 
@@ -868,7 +888,6 @@ const deletePointFromPolygon = (e: MouseEvent, annotation: PolygonAnnotation | P
 const selectAnnotationByLabel = (label: string) => {
     // 找到所有具有该标签的标注
     const labeledAnnotations = annotations.value.filter(a => a.label === label)
-
     if (labeledAnnotations.length > 0) {
         // 选中第一个具有该标签的标注
         selectedId.value = labeledAnnotations[0].id
@@ -879,7 +898,6 @@ const selectAnnotationByLabel = (label: string) => {
 // 判断标签是否处于活动状态（是否有对应标注被选中）
 const isLabelActive = (label: string): boolean => {
     if (!selectedId.value) return false
-
     const selectedAnnotation = annotations.value.find(a => a.id === selectedId.value)
     return selectedAnnotation?.label === label
 }
@@ -912,6 +930,18 @@ watch(selectedId, (newId) => {
 
 // 鼠标事件处理
 const handleMouseDown = (e: MouseEvent) => {
+    // 检查鼠标中键 - 移动图片
+    if (e.button === 1) { // 鼠标中键
+        isDraggingImage.value = true
+        dragType.value = 'image'
+        lastMousePos.value = {
+            x: e.clientX - canvasRef.value.getBoundingClientRect().left,
+            y: e.clientY - canvasRef.value.getBoundingClientRect().top
+        }
+        e.preventDefault() // 防止中键滚动
+        return
+    }
+
     const canvas = canvasRef.value
     if (!canvas) return
 
@@ -928,17 +958,14 @@ const handleMouseDown = (e: MouseEvent) => {
     }
 
     const imagePoint = canvasToImage(canvasX, canvasY)
-
     startPoint.value = { x: canvasX, y: canvasY }
     lastMousePos.value = { x: canvasX, y: canvasY }
 
     if (mode.value === 'select') {
         // 检查是否点击了标注（不限制鼠标位置）
         const clickedAnnotation = findAnnotationAtPoint(canvasX, canvasY)
-
         if (clickedAnnotation) {
             selectedId.value = clickedAnnotation.id
-
             // 检查是否点击了标签区域
             if (clickedAnnotation.label) {
                 const labelBounds = getLabelBounds(clickedAnnotation)
@@ -949,7 +976,6 @@ const handleMouseDown = (e: MouseEvent) => {
                     return
                 }
             }
-
             // 检查是否点击了控制点或顶点
             if (clickedAnnotation.type === 'rect') {
                 const rectAnnotation = clickedAnnotation as RectAnnotation
@@ -959,14 +985,12 @@ const handleMouseDown = (e: MouseEvent) => {
                     width: rectAnnotation.width * scale.value,
                     height: rectAnnotation.height * scale.value
                 }
-
                 const handles = [
                     { x: canvasRect.x, y: canvasRect.y, type: 'resize', corner: 'tl' },
                     { x: canvasRect.x + canvasRect.width, y: canvasRect.y, type: 'resize', corner: 'tr' },
                     { x: canvasRect.x, y: canvasRect.y + canvasRect.height, type: 'resize', corner: 'bl' },
                     { x: canvasRect.x + canvasRect.width, y: canvasRect.y + canvasRect.height, type: 'resize', corner: 'br' }
                 ]
-
                 for (let i = 0; i < handles.length; i++) {
                     const handle = handles[i]
                     const distance = Math.sqrt(Math.pow(canvasX - handle.x, 2) + Math.pow(canvasY - handle.y, 2))
@@ -978,7 +1002,6 @@ const handleMouseDown = (e: MouseEvent) => {
                         return
                     }
                 }
-
                 // 如果没有点击控制点，则移动整个矩形
                 isDragging.value = true
                 dragType.value = 'move'
@@ -988,7 +1011,6 @@ const handleMouseDown = (e: MouseEvent) => {
                 }
             } else if (clickedAnnotation.type === 'polygon' || clickedAnnotation.type === 'polyline') {
                 const polygonAnnotation = clickedAnnotation as PolygonAnnotation | PolylineAnnotation
-
                 // 检查是否点击了顶点
                 for (let i = 0; i < polygonAnnotation.points.length; i++) {
                     const canvasPoint = imageToCanvas(polygonAnnotation.points[i].x, polygonAnnotation.points[i].y)
@@ -1000,20 +1022,16 @@ const handleMouseDown = (e: MouseEvent) => {
                         return
                     }
                 }
-
                 // 检查是否点击了边（用于添加点）
                 if (e.shiftKey) {
                     addPointToPolygon(e, polygonAnnotation)
                     return
                 }
-
                 // 如果没有点击顶点，则移动整个多边形
                 isDragging.value = true
                 dragType.value = 'move'
-
                 // 保存多边形初始位置
                 polygonDragStartPoints.value = [...polygonAnnotation.points]
-
                 // 计算鼠标相对于多边形中心的偏移
                 const centerPoint = getPolygonCenter(polygonAnnotation.points)
                 const centerCanvasPoint = imageToCanvas(centerPoint.x, centerPoint.y)
@@ -1037,9 +1055,14 @@ const handleMouseDown = (e: MouseEvent) => {
             isDraggingImage.value = true
             dragType.value = 'image'
         }
-
         redrawCanvas()
     } else if (mode.value === 'rect') {
+        // 检查是否是快捷绘制模式
+        if (!isQuickDrawing.value) {
+            // 如果不是快捷绘制模式，则不进行绘制
+            return
+        }
+
         isDrawing.value = true
         tempAnnotation.value = {
             id: generateId(),
@@ -1050,13 +1073,26 @@ const handleMouseDown = (e: MouseEvent) => {
             height: 0,
             color: getRandomColor(),
             label: '未命名',
-            properties: {}
+            properties: {},
+            visible: true // 新增：默认可见
         }
     } else if (mode.value === 'polygon' || mode.value === 'polyline') {
+        // 检查是否是快捷绘制模式
+        if (!isQuickDrawing.value) {
+            // 如果不是快捷绘制模式，则不进行绘制
+            return
+        }
+
         // 添加点（使用图片原始坐标）
         currentPoints.value.push(imagePoint)
         redrawCanvas()
     } else if (mode.value === 'point') {
+        // 检查是否是快捷绘制模式
+        if (!isQuickDrawing.value) {
+            // 如果不是快捷绘制模式，则不进行绘制
+            return
+        }
+
         const newPoint: PointAnnotation = {
             id: generateId(),
             type: 'point',
@@ -1064,11 +1100,18 @@ const handleMouseDown = (e: MouseEvent) => {
             y: imagePoint.y,
             color: getRandomColor(),
             label: '未命名',
-            properties: {}
+            properties: {},
+            visible: true // 新增：默认可见
         }
         annotations.value.push(newPoint)
         // 保存当前图片的标注
         saveCurrentImageAnnotations()
+
+        // 绘制完成后切换回选择模式
+        if (isQuickDrawing.value) {
+            setMode('select')
+        }
+
         redrawCanvas()
     }
 }
@@ -1076,9 +1119,7 @@ const handleMouseDown = (e: MouseEvent) => {
 // 右键点击事件（删除点）
 const handleRightClick = (e: MouseEvent) => {
     e.preventDefault()
-
     if (mode.value !== 'select' || !selectedId.value) return
-
     const canvas = canvasRef.value
     if (!canvas) return
 
@@ -1090,7 +1131,6 @@ const handleRightClick = (e: MouseEvent) => {
     if (!annotation || (annotation.type !== 'polygon' && annotation.type !== 'polyline')) return
 
     const polygonAnnotation = annotation as PolygonAnnotation | PolylineAnnotation
-
     // 检查是否点击了顶点
     for (let i = 0; i < polygonAnnotation.points.length; i++) {
         const canvasPoint = imageToCanvas(polygonAnnotation.points[i].x, polygonAnnotation.points[i].y)
@@ -1131,17 +1171,14 @@ const handleMouseMove = (e: MouseEvent) => {
 
         if (annotation.type === 'rect') {
             const rectAnnotation = annotation as RectAnnotation
-
             if (dragType.value === 'move') {
                 // 移动整个矩形
                 const newCanvasX = canvasX - dragOffset.value.x
                 const newCanvasY = canvasY - dragOffset.value.y
                 const newImagePoint = canvasToImage(newCanvasX, newCanvasY)
-
                 // 直接更新矩形位置
                 rectAnnotation.x = newImagePoint.x
                 rectAnnotation.y = newImagePoint.y
-
                 // 应用严格的边界限制
                 const clampedRect = clampRectToImageStrict(rectAnnotation)
                 rectAnnotation.x = clampedRect.x
@@ -1152,10 +1189,8 @@ const handleMouseMove = (e: MouseEvent) => {
                 // 调整矩形大小
                 const corners = ['tl', 'tr', 'bl', 'br']
                 const corner = corners[dragIndex.value]
-
                 // 创建临时矩形
                 const tempRect = { ...rectAnnotation }
-
                 if (corner === 'tl') {
                     tempRect.width += tempRect.x - imagePoint.x
                     tempRect.height += tempRect.y - imagePoint.y
@@ -1173,7 +1208,6 @@ const handleMouseMove = (e: MouseEvent) => {
                     tempRect.width = imagePoint.x - tempRect.x
                     tempRect.height = imagePoint.y - tempRect.y
                 }
-
                 // 确保宽高为正
                 if (tempRect.width < 0) {
                     tempRect.x += tempRect.width
@@ -1183,10 +1217,8 @@ const handleMouseMove = (e: MouseEvent) => {
                     tempRect.y += tempRect.height
                     tempRect.height = Math.abs(tempRect.height)
                 }
-
                 // 应用严格的边界限制
                 const clampedRect = clampRectToImageStrict(tempRect)
-
                 // 更新矩形
                 rectAnnotation.x = clampedRect.x
                 rectAnnotation.y = clampedRect.y
@@ -1195,26 +1227,21 @@ const handleMouseMove = (e: MouseEvent) => {
             }
         } else if (annotation.type === 'polygon' || annotation.type === 'polyline') {
             const polygonAnnotation = annotation as PolygonAnnotation | PolylineAnnotation
-
             if (dragType.value === 'move') {
                 // 计算多边形中心应该移动到的位置
                 const newCenterCanvasX = canvasX - dragOffset.value.x
                 const newCenterCanvasY = canvasY - dragOffset.value.y
                 const newCenterImagePoint = canvasToImage(newCenterCanvasX, newCenterCanvasY)
-
                 // 计算原始中心点
                 const originalCenter = getPolygonCenter(polygonDragStartPoints.value)
-
                 // 计算偏移量
                 const dx = newCenterImagePoint.x - originalCenter.x
                 const dy = newCenterImagePoint.y - originalCenter.y
-
                 // 移动整个多边形
                 polygonAnnotation.points = polygonDragStartPoints.value.map(point => ({
                     x: point.x + dx,
                     y: point.y + dy
                 }))
-
                 // 限制所有点在图片范围内
                 const bounds = getImageBounds()
                 if (bounds) {
@@ -1227,7 +1254,6 @@ const handleMouseMove = (e: MouseEvent) => {
             } else if (dragType.value === 'vertex') {
                 // 移动顶点
                 polygonAnnotation.points[dragIndex.value] = imagePoint
-
                 // 限制点在图片范围内
                 const bounds = getImageBounds()
                 if (bounds) {
@@ -1238,16 +1264,13 @@ const handleMouseMove = (e: MouseEvent) => {
             }
         } else if (annotation.type === 'point') {
             const pointAnnotation = annotation as PointAnnotation
-
             if (dragType.value === 'move') {
                 // 计算点应该移动到的位置
                 const newCanvasX = canvasX - dragOffset.value.x
                 const newCanvasY = canvasY - dragOffset.value.y
                 const newImagePoint = canvasToImage(newCanvasX, newCanvasY)
-
                 pointAnnotation.x = newImagePoint.x
                 pointAnnotation.y = newImagePoint.y
-
                 // 限制点在图片范围内
                 const bounds = getImageBounds()
                 if (bounds) {
@@ -1258,10 +1281,8 @@ const handleMouseMove = (e: MouseEvent) => {
                 }
             }
         }
-
         // 保存当前图片的标注
         saveCurrentImageAnnotations()
-
         redrawCanvas()
         return
     }
@@ -1271,7 +1292,6 @@ const handleMouseMove = (e: MouseEvent) => {
         const rectAnnotation = tempAnnotation.value as RectAnnotation
         rectAnnotation.width = imagePoint.x - rectAnnotation.x
         rectAnnotation.height = imagePoint.y - rectAnnotation.y
-
         // 确保宽高为正
         if (rectAnnotation.width < 0) {
             rectAnnotation.x += rectAnnotation.width
@@ -1281,19 +1301,16 @@ const handleMouseMove = (e: MouseEvent) => {
             rectAnnotation.y += rectAnnotation.height
             rectAnnotation.height = Math.abs(rectAnnotation.height)
         }
-
         // 限制在图片范围内
         const clampedRect = clampRectToImageStrict(rectAnnotation)
         rectAnnotation.x = clampedRect.x
         rectAnnotation.y = clampedRect.y
         rectAnnotation.width = clampedRect.width
         rectAnnotation.height = clampedRect.height
-
         redrawCanvas()
     } else if ((mode.value === 'polygon' || mode.value === 'polyline') && currentPoints.value.length > 0) {
         // 限制当前鼠标位置在图片范围内
         const clampedCanvasPoint = clampPointToImage({ x: canvasX, y: canvasY })
-
         // 绘制临时多边形/折线
         redrawCanvas()
         const ctx = canvas.getContext('2d')
@@ -1301,25 +1318,19 @@ const handleMouseMove = (e: MouseEvent) => {
             ctx.strokeStyle = '#ff0000'
             ctx.lineWidth = 2
             ctx.beginPath()
-
             // 将多边形/折线点转换为画布坐标
             const firstCanvasPoint = imageToCanvas(currentPoints.value[0].x, currentPoints.value[0].y)
             ctx.moveTo(firstCanvasPoint.x, firstCanvasPoint.y)
-
             for (let i = 1; i < currentPoints.value.length; i++) {
                 const canvasPoint = imageToCanvas(currentPoints.value[i].x, currentPoints.value[i].y)
                 ctx.lineTo(canvasPoint.x, canvasPoint.y)
             }
-
             ctx.lineTo(clampedCanvasPoint.x, clampedCanvasPoint.y)
-
             // 如果是多边形，则闭合
             if (mode.value === 'polygon') {
                 ctx.closePath()
             }
-
             ctx.stroke()
-
             // 绘制已确定的点
             ctx.fillStyle = '#ff0000'
             currentPoints.value.forEach(point => {
@@ -1333,9 +1344,15 @@ const handleMouseMove = (e: MouseEvent) => {
 }
 
 const handleMouseUp = (e: MouseEvent) => {
+    // 处理鼠标中键释放
+    if (e.button === 1) {
+        isDraggingImage.value = false
+        dragType.value = null
+        return
+    }
+
     if (isDrawing.value && tempAnnotation.value && tempAnnotation.value.type === 'rect') {
         const rectAnnotation = tempAnnotation.value as RectAnnotation
-
         // 确保宽高为正
         if (rectAnnotation.width < 0) {
             rectAnnotation.x += rectAnnotation.width
@@ -1345,19 +1362,22 @@ const handleMouseUp = (e: MouseEvent) => {
             rectAnnotation.y += rectAnnotation.height
             rectAnnotation.height = Math.abs(rectAnnotation.height)
         }
-
         // 只保存有效矩形
         if (rectAnnotation.width > 5 && rectAnnotation.height > 5) {
             annotations.value.push(rectAnnotation)
             // 保存当前图片的标注
             saveCurrentImageAnnotations()
         }
-
         isDrawing.value = false
         tempAnnotation.value = null
+
+        // 绘制完成后切换回选择模式
+        if (isQuickDrawing.value) {
+            setMode('select')
+        }
+
         redrawCanvas()
     }
-
     // 结束拖动
     isDragging.value = false
     isDraggingImage.value = false
@@ -1368,7 +1388,6 @@ const handleMouseUp = (e: MouseEvent) => {
 const handleDoubleClick = (e: MouseEvent) => {
     if ((mode.value === 'polygon' || mode.value === 'polyline') && currentPoints.value.length >= 2) {
         const minPoints = mode.value === 'polygon' ? 3 : 2
-
         if (currentPoints.value.length < minPoints) {
             pointOperationHint.value = `${mode.value === 'polygon' ? '多边形' : '折线'}至少需要${minPoints}个点`
             setTimeout(() => {
@@ -1376,19 +1395,25 @@ const handleDoubleClick = (e: MouseEvent) => {
             }, 2000)
             return
         }
-
         const newAnnotation: PolygonAnnotation | PolylineAnnotation = {
             id: generateId(),
             type: mode.value,
             points: [...currentPoints.value],
             color: getRandomColor(),
             label: '未命名',
-            properties: {}
+            properties: {},
+            visible: true // 新增：默认可见
         }
         annotations.value.push(newAnnotation)
         // 保存当前图片的标注
         saveCurrentImageAnnotations()
         currentPoints.value = []
+
+        // 绘制完成后切换回选择模式
+        if (isQuickDrawing.value) {
+            setMode('select')
+        }
+
         redrawCanvas()
     }
 }
@@ -1396,7 +1421,6 @@ const handleDoubleClick = (e: MouseEvent) => {
 // 处理鼠标滚轮（缩放）
 const handleWheel = (e: WheelEvent) => {
     e.preventDefault()
-
     const canvas = canvasRef.value
     if (!canvas || !backgroundImage.value) return
 
@@ -1418,14 +1442,12 @@ const handleWheel = (e: WheelEvent) => {
 
     scale.value = newScale
     offset.value = { x: newOffsetX, y: newOffsetY }
-
     redrawCanvas()
 }
 
 // 获取标签边界
 const getLabelBounds = (annotation: Annotation): { left: number, top: number, right: number, bottom: number } | null => {
     if (!annotation.label) return null
-
     const ctx = canvasRef.value?.getContext('2d')
     if (!ctx) return null
 
@@ -1463,7 +1485,6 @@ const getLabelBounds = (annotation: Annotation): { left: number, top: number, ri
             bottom: canvasPoint.y - 5
         }
     }
-
     return null
 }
 
@@ -1472,6 +1493,8 @@ const findAnnotationAtPoint = (canvasX: number, canvasY: number): Annotation | n
     // 从后往前查找（最后绘制的在最上层）
     for (let i = annotations.value.length - 1; i >= 0; i--) {
         const annotation = annotations.value[i]
+        // 如果标注不可见，则跳过
+        if (annotation.visible === false) continue
 
         if (annotation.type === 'rect') {
             const rect = annotation as RectAnnotation
@@ -1481,7 +1504,6 @@ const findAnnotationAtPoint = (canvasX: number, canvasY: number): Annotation | n
                 width: rect.width * scale.value,
                 height: rect.height * scale.value
             }
-
             // 扩大检测范围，使贴边的标注更容易选中
             const expandedRect = {
                 x: canvasRect.x - 5,
@@ -1489,50 +1511,41 @@ const findAnnotationAtPoint = (canvasX: number, canvasY: number): Annotation | n
                 width: canvasRect.width + 10,
                 height: canvasRect.height + 10
             }
-
             if (canvasX >= expandedRect.x && canvasX <= expandedRect.x + expandedRect.width &&
                 canvasY >= expandedRect.y && canvasY <= expandedRect.y + expandedRect.height) {
                 return annotation
             }
         } else if (annotation.type === 'polygon') {
             const polygon = annotation as PolygonAnnotation
-
             // 将多边形点转换为画布坐标
             const canvasPoints = polygon.points.map(point =>
                 imageToCanvas(point.x, point.y)
             )
-
             if (isPointInPolygonCanvas(canvasX, canvasY, canvasPoints)) {
                 return annotation
             }
-
             // 如果点不在多边形内，检查是否靠近任何边
             for (let i = 0; i < canvasPoints.length; i++) {
                 const p1 = canvasPoints[i]
                 const p2 = canvasPoints[(i + 1) % canvasPoints.length]
-
                 if (distanceToLineSegment(canvasX, canvasY, p1.x, p1.y, p2.x, p2.y) < 8) {
                     return annotation
                 }
             }
         } else if (annotation.type === 'polyline') {
             const polyline = annotation as PolylineAnnotation
-
             // 将折线点转换为画布坐标
             const canvasPoints = polyline.points.map(point =>
                 imageToCanvas(point.x, point.y)
             )
-
             // 检查是否靠近任何边
             for (let i = 0; i < canvasPoints.length - 1; i++) {
                 const p1 = canvasPoints[i]
                 const p2 = canvasPoints[i + 1]
-
                 if (distanceToLineSegment(canvasX, canvasY, p1.x, p1.y, p2.x, p2.y) < 8) {
                     return annotation
                 }
             }
-
             // 检查是否靠近任何顶点
             for (let i = 0; i < canvasPoints.length; i++) {
                 const p = canvasPoints[i]
@@ -1545,7 +1558,6 @@ const findAnnotationAtPoint = (canvasX: number, canvasY: number): Annotation | n
             const point = annotation as PointAnnotation
             const canvasPoint = imageToCanvas(point.x, point.y)
             const distance = Math.sqrt(Math.pow(canvasX - canvasPoint.x, 2) + Math.pow(canvasY - canvasPoint.y, 2))
-
             // 扩大检测范围
             if (distance <= 10) {
                 return annotation
@@ -1561,7 +1573,6 @@ const isPointInPolygonCanvas = (x: number, y: number, points: Point[]): boolean 
     for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
         const xi = points[i].x, yi = points[i].y
         const xj = points[j].x, yj = points[j].y
-
         const intersect = ((yi > y) !== (yj > y))
             && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)
         if (intersect) inside = !inside
@@ -1575,17 +1586,13 @@ const distanceToLineSegment = (x: number, y: number, x1: number, y1: number, x2:
     const B = y - y1
     const C = x2 - x1
     const D = y2 - y1
-
     const dot = A * C + B * D
     const lenSq = C * C + D * D
     let param = -1
-
     if (lenSq !== 0) {
         param = dot / lenSq
     }
-
     let xx, yy
-
     if (param < 0) {
         xx = x1
         yy = y1
@@ -1596,10 +1603,8 @@ const distanceToLineSegment = (x: number, y: number, x1: number, y1: number, x2:
         xx = x1 + param * C
         yy = y1 + param * D
     }
-
     const dx = x - xx
     const dy = y - yy
-
     return Math.sqrt(dx * dx + dy * dy)
 }
 
@@ -1620,7 +1625,6 @@ const deleteSelected = () => {
 const exportAnnotations = () => {
     // 保存当前图片的标注
     saveCurrentImageAnnotations()
-
     // 导出所有图片的标注数据
     const data = {
         images: imageList.value,
@@ -1629,7 +1633,6 @@ const exportAnnotations = () => {
     const json = JSON.stringify(data, null, 2)
     const blob = new Blob([json], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
-
     const a = document.createElement('a')
     a.href = url
     a.download = `annotations_${Date.now()}.json`
@@ -1692,6 +1695,9 @@ const redrawCanvas = () => {
 
 // 绘制单个标注
 const drawAnnotation = (ctx: CanvasRenderingContext2D, annotation: Annotation) => {
+    // 如果标注不可见，则不绘制
+    if (annotation.visible === false) return
+
     const isSelected = annotation.id === selectedId.value
 
     if (annotation.type === 'rect') {
@@ -1702,11 +1708,9 @@ const drawAnnotation = (ctx: CanvasRenderingContext2D, annotation: Annotation) =
             width: rect.width * scale.value,
             height: rect.height * scale.value
         }
-
         ctx.strokeStyle = isSelected ? '#ff0000' : annotation.color
         ctx.lineWidth = isSelected ? 3 : 2
         ctx.strokeRect(canvasRect.x, canvasRect.y, canvasRect.width, canvasRect.height)
-
         // 绘制标签
         if (annotation.label) {
             ctx.fillStyle = isSelected ? '#ff0000' : annotation.color
@@ -1715,7 +1719,6 @@ const drawAnnotation = (ctx: CanvasRenderingContext2D, annotation: Annotation) =
             ctx.textBaseline = 'bottom'
             ctx.fillText(annotation.label, canvasRect.x, canvasRect.y - 5)
         }
-
         if (isSelected) {
             // 绘制控制点
             ctx.fillStyle = '#ff0000'
@@ -1734,23 +1737,18 @@ const drawAnnotation = (ctx: CanvasRenderingContext2D, annotation: Annotation) =
         ctx.strokeStyle = isSelected ? '#ff0000' : annotation.color
         ctx.lineWidth = isSelected ? 3 : 2
         ctx.beginPath()
-
         // 将多边形/折线点转换为画布坐标
         const firstCanvasPoint = imageToCanvas(polygon.points[0].x, polygon.points[0].y)
         ctx.moveTo(firstCanvasPoint.x, firstCanvasPoint.y)
-
         for (let i = 1; i < polygon.points.length; i++) {
             const canvasPoint = imageToCanvas(polygon.points[i].x, polygon.points[i].y)
             ctx.lineTo(canvasPoint.x, canvasPoint.y)
         }
-
         // 如果是多边形，则闭合
         if (annotation.type === 'polygon') {
             ctx.closePath()
         }
-
         ctx.stroke()
-
         // 绘制标签
         if (annotation.label && polygon.points.length > 0) {
             ctx.fillStyle = isSelected ? '#ff0000' : annotation.color
@@ -1759,7 +1757,6 @@ const drawAnnotation = (ctx: CanvasRenderingContext2D, annotation: Annotation) =
             ctx.textBaseline = 'bottom'
             ctx.fillText(annotation.label, firstCanvasPoint.x, firstCanvasPoint.y - 5)
         }
-
         if (isSelected) {
             // 绘制顶点控制点
             ctx.fillStyle = '#ff0000'
@@ -1769,7 +1766,6 @@ const drawAnnotation = (ctx: CanvasRenderingContext2D, annotation: Annotation) =
                 ctx.arc(canvasPoint.x, canvasPoint.y, 4, 0, Math.PI * 2)
                 ctx.fill()
             })
-
             // 如果按住Shift键，显示添加点的提示
             if (pointOperationHint.value === '') {
                 ctx.fillStyle = '#333'
@@ -1781,12 +1777,10 @@ const drawAnnotation = (ctx: CanvasRenderingContext2D, annotation: Annotation) =
     } else if (annotation.type === 'point') {
         const point = annotation as PointAnnotation
         const canvasPoint = imageToCanvas(point.x, point.y)
-
         ctx.fillStyle = isSelected ? '#ff0000' : annotation.color
         ctx.beginPath()
         ctx.arc(canvasPoint.x, canvasPoint.y, isSelected ? 6 : 4, 0, Math.PI * 2)
         ctx.fill()
-
         // 绘制标签
         if (annotation.label) {
             ctx.fillStyle = isSelected ? '#ff0000' : annotation.color
@@ -1795,7 +1789,6 @@ const drawAnnotation = (ctx: CanvasRenderingContext2D, annotation: Annotation) =
             ctx.textBaseline = 'bottom'
             ctx.fillText(annotation.label, canvasPoint.x, canvasPoint.y - 10)
         }
-
         if (isSelected) {
             ctx.strokeStyle = '#ffffff'
             ctx.lineWidth = 2
@@ -1830,6 +1823,7 @@ const getRandomColor = (): string => {
     gap: 10px;
     margin-bottom: 20px;
     flex-wrap: wrap;
+    align-items: center;
 }
 
 .toolbar button {
@@ -1853,6 +1847,15 @@ const getRandomColor = (): string => {
 .toolbar button:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+}
+
+.shortcut-hint {
+    margin-left: auto;
+    font-size: 12px;
+    color: #666;
+    background: #f9f9f9;
+    padding: 4px 8px;
+    border-radius: 3px;
 }
 
 .main-content {
